@@ -6,13 +6,9 @@ import base64
 import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
-from geopy.distance import geodesic
 from scipy.spatial import KDTree
 import datetime
-import os
-import sys
 import traceback
-from functools import partial
 
 # Configuration de la page Streamlit
 st.set_page_config(
@@ -121,6 +117,13 @@ def apply_custom_css():
             text-align: center;
             color: #7f8c8d;
             border-top: 1px solid #eee;
+        }
+        /* Style pour les correspondances exactes */
+        .exact-match {
+            background-color: #d4f7d4 !important;
+        }
+        .near-match {
+            background-color: #fff7d4 !important;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -329,7 +332,7 @@ def display_status_line(message, status):
     st.markdown(f"{get_status_badge(status)} {message}", unsafe_allow_html=True)
 
 # Fonction améliorée pour vérifier les doublons d'échantillons composites
-def check_composite_duplicates(data, distance_threshold=1.0, match_attributes=None):
+def check_composite_duplicates(data, distance_threshold=1.0, match_attributes=None, require_exact_coordinates=True):
     """
     Vérifie les doublons d'échantillons composites en utilisant différentes méthodes.
     
@@ -341,6 +344,8 @@ def check_composite_duplicates(data, distance_threshold=1.0, match_attributes=No
         Seuil de distance (mètres) pour les doublons spatiaux
     match_attributes : list
         Liste des attributs à comparer pour détecter des doublons (ex: ['Au', 'Cu'])
+    require_exact_coordinates : bool
+        Si True, ne considère comme doublons spatiaux que les points ayant exactement les mêmes coordonnées
         
     Returns:
     --------
@@ -389,7 +394,7 @@ def check_composite_duplicates(data, distance_threshold=1.0, match_attributes=No
                 results['identical_attributes'] = attr_duplicates
                 duplicate_counts['identical_attributes'] = len(attr_duplicates)
         
-        # 3. Vérification des doublons par proximité spatiale
+        # 3. Vérification des doublons par proximité spatiale ou coordonnées identiques
         coord_cols = ['x', 'y', 'z']
         if all(col in data.columns for col in coord_cols):
             # S'assurer que les coordonnées sont numériques
@@ -402,75 +407,162 @@ def check_composite_duplicates(data, distance_threshold=1.0, match_attributes=No
             coords_data = coords_data.dropna(subset=coord_cols)
             
             if len(coords_data) >= 2:
-                # Extraire les coordonnées pour la recherche spatiale
-                coords = coords_data[coord_cols].values
-                
-                # Utiliser KDTree pour trouver efficacement les paires proches
-                try:
-                    tree = KDTree(coords)
-                    pairs = tree.query_pairs(distance_threshold, output_type='ndarray')
+                # Deux approches différentes selon require_exact_coordinates
+                if require_exact_coordinates:
+                    # Pour les coordonnées exactement identiques, utiliser duplicated
+                    dup_indices = coords_data[coords_data.duplicated(subset=coord_cols, keep=False)].index.tolist()
                     
-                    if len(pairs) > 0:
-                        # Créer un DataFrame avec les détails des paires trouvées
-                        result_rows = []
-                        for i, j in pairs:
-                            try:
-                                i, j = int(i), int(j)
-                                # Indices dans le DataFrame filtré (sans NA)
-                                orig_idx1 = coords_data.index[i]
-                                orig_idx2 = coords_data.index[j]
-                                
-                                point1 = coords[i]
-                                point2 = coords[j]
-                                distance = np.linalg.norm(point1 - point2)
-                                
-                                row1 = coords_data.loc[orig_idx1].to_dict()
-                                row2 = coords_data.loc[orig_idx2].to_dict()
-                                
-                                # Créer une entrée détaillée pour chaque paire
-                                entry = {
-                                    'index1': orig_idx1,
-                                    'index2': orig_idx2,
-                                    'distance_m': distance,
-                                    'holeid1': coords_data.loc[orig_idx1, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{orig_idx1}",
-                                    'holeid2': coords_data.loc[orig_idx2, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{orig_idx2}",
-                                }
-                                
-                                # Ajouter les coordonnées
-                                for col in coord_cols:
-                                    entry[f"{col}1"] = row1[col]
-                                    entry[f"{col}2"] = row2[col]
-                                
-                                # Ajouter les attributs comparés si disponibles
-                                if match_attributes:
-                                    for attr in match_attributes:
-                                        if attr in coords_data.columns:
-                                            entry[f"{attr}1"] = row1.get(attr, None)
-                                            entry[f"{attr}2"] = row2.get(attr, None)
-                                            
-                                            # Calculer la différence pour les attributs numériques
-                                            if pd.api.types.is_numeric_dtype(coords_data[attr]):
-                                                val1 = row1.get(attr, 0)
-                                                val2 = row2.get(attr, 0)
-                                                if val1 is not None and val2 is not None:
-                                                    entry[f"{attr}_diff"] = abs(val1 - val2)
-                                                    if val1 != 0:  # Éviter division par zéro
-                                                        entry[f"{attr}_pct_diff"] = abs(val1 - val2) / abs(val1) * 100
-                                
-                                result_rows.append(entry)
-                            except Exception as e:
-                                # Gérer les erreurs spécifiques à chaque paire
-                                st.warning(f"Erreur lors du traitement d'une paire de points: {str(e)}")
-                                continue
+                    # Créer des paires à partir des lignes dupliquées
+                    if len(dup_indices) > 1:
+                        # Grouper par coordonnées identiques
+                        coord_groups = {}
+                        for idx in dup_indices:
+                            row = coords_data.loc[idx]
+                            coord_key = (row['x'], row['y'], row['z'])
+                            if coord_key not in coord_groups:
+                                coord_groups[coord_key] = []
+                            coord_groups[coord_key].append(idx)
                         
-                        # Créer le DataFrame de résultats et trier par distance
-                        spatial_duplicates = pd.DataFrame(result_rows)
-                        if not spatial_duplicates.empty:
-                            spatial_duplicates = spatial_duplicates.sort_values('distance_m')
+                        # Créer des paires à partir des groupes
+                        result_rows = []
+                        for coord_key, indices in coord_groups.items():
+                            if len(indices) > 1:
+                                # Créer toutes les paires possibles parmi les indices
+                                for i in range(len(indices)):
+                                    for j in range(i+1, len(indices)):
+                                        idx1, idx2 = indices[i], indices[j]
+                                        row1 = coords_data.loc[idx1].to_dict()
+                                        row2 = coords_data.loc[idx2].to_dict()
+                                        
+                                        # Créer une entrée détaillée pour chaque paire
+                                        entry = {
+                                            'index1': idx1,
+                                            'index2': idx2,
+                                            'distance_m': 0.0,  # Comme les coordonnées sont identiques
+                                            'is_exact_match': True,
+                                            'holeid1': coords_data.loc[idx1, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{idx1}",
+                                            'holeid2': coords_data.loc[idx2, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{idx2}",
+                                            'x_diff': 0,
+                                            'y_diff': 0,
+                                            'z_diff': 0
+                                        }
+                                        
+                                        # Ajouter les coordonnées
+                                        for col in coord_cols:
+                                            entry[f"{col}1"] = row1[col]
+                                            entry[f"{col}2"] = row2[col]
+                                        
+                                        # Ajouter les attributs comparés si disponibles
+                                        if match_attributes:
+                                            for attr in match_attributes:
+                                                if attr in coords_data.columns:
+                                                    entry[f"{attr}1"] = row1.get(attr, None)
+                                                    entry[f"{attr}2"] = row2.get(attr, None)
+                                                    
+                                                    # Calculer la différence pour les attributs numériques
+                                                    if pd.api.types.is_numeric_dtype(coords_data[attr]):
+                                                        val1 = row1.get(attr, 0)
+                                                        val2 = row2.get(attr, 0)
+                                                        if val1 is not None and val2 is not None:
+                                                            entry[f"{attr}_diff"] = abs(val1 - val2)
+                                                            if val1 != 0:  # Éviter division par zéro
+                                                                entry[f"{attr}_pct_diff"] = abs(val1 - val2) / abs(val1) * 100
+                                        
+                                        result_rows.append(entry)
+                        
+                        # Créer un DataFrame avec les paires de coordonnées identiques
+                        if result_rows:
+                            spatial_duplicates = pd.DataFrame(result_rows)
                             results['spatial_duplicates'] = spatial_duplicates
                             duplicate_counts['spatial_duplicates'] = len(spatial_duplicates)
-                except Exception as e:
-                    st.warning(f"Erreur lors de l'analyse spatiale: {str(e)}")
+                            
+                else:
+                    # Pour la recherche de proximité, utiliser KDTree
+                    # Extraire les coordonnées pour la recherche spatiale
+                    coords = coords_data[coord_cols].values
+                    
+                    # Utiliser KDTree pour trouver efficacement les paires proches
+                    try:
+                        tree = KDTree(coords)
+                        pairs = tree.query_pairs(distance_threshold, output_type='ndarray')
+                        
+                        if len(pairs) > 0:
+                            # Créer un DataFrame avec les détails des paires trouvées
+                            result_rows = []
+                            for i, j in pairs:
+                                try:
+                                    i, j = int(i), int(j)
+                                    # Indices dans le DataFrame filtré (sans NA)
+                                    orig_idx1 = coords_data.index[i]
+                                    orig_idx2 = coords_data.index[j]
+                                    
+                                    point1 = coords[i]
+                                    point2 = coords[j]
+                                    distance = np.linalg.norm(point1 - point2)
+                                    
+                                    # Calculer les différences de coordonnées
+                                    x_diff = abs(point1[0] - point2[0])
+                                    y_diff = abs(point1[1] - point2[1])
+                                    z_diff = abs(point1[2] - point2[2])
+                                    
+                                    # Vérifier si c'est un match exact de coordonnées
+                                    is_exact_match = (x_diff == 0.0 and y_diff == 0.0 and z_diff == 0.0)
+                                    
+                                    row1 = coords_data.loc[orig_idx1].to_dict()
+                                    row2 = coords_data.loc[orig_idx2].to_dict()
+                                    
+                                    # Créer une entrée détaillée pour chaque paire
+                                    entry = {
+                                        'index1': orig_idx1,
+                                        'index2': orig_idx2,
+                                        'distance_m': distance,
+                                        'is_exact_match': is_exact_match,
+                                        'holeid1': coords_data.loc[orig_idx1, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{orig_idx1}",
+                                        'holeid2': coords_data.loc[orig_idx2, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{orig_idx2}",
+                                        'x_diff': x_diff,
+                                        'y_diff': y_diff,
+                                        'z_diff': z_diff
+                                    }
+                                    
+                                    # Ajouter les coordonnées
+                                    for col in coord_cols:
+                                        entry[f"{col}1"] = row1[col]
+                                        entry[f"{col}2"] = row2[col]
+                                    
+                                    # Ajouter les attributs comparés si disponibles
+                                    if match_attributes:
+                                        for attr in match_attributes:
+                                            if attr in coords_data.columns:
+                                                entry[f"{attr}1"] = row1.get(attr, None)
+                                                entry[f"{attr}2"] = row2.get(attr, None)
+                                                
+                                                # Calculer la différence pour les attributs numériques
+                                                if pd.api.types.is_numeric_dtype(coords_data[attr]):
+                                                    val1 = row1.get(attr, 0)
+                                                    val2 = row2.get(attr, 0)
+                                                    if val1 is not None and val2 is not None:
+                                                        entry[f"{attr}_diff"] = abs(val1 - val2)
+                                                        if val1 != 0:  # Éviter division par zéro
+                                                            entry[f"{attr}_pct_diff"] = abs(val1 - val2) / abs(val1) * 100
+                                    
+                                    # Si on ne conserve que les matches exacts mais que ce n'est pas un match exact, sauter
+                                    if require_exact_coordinates and not is_exact_match:
+                                        continue
+                                    
+                                    result_rows.append(entry)
+                                except Exception as e:
+                                    # Gérer les erreurs spécifiques à chaque paire
+                                    st.warning(f"Erreur lors du traitement d'une paire de points: {str(e)}")
+                                    continue
+                            
+                            # Créer le DataFrame de résultats et trier par distance
+                            spatial_duplicates = pd.DataFrame(result_rows)
+                            if not spatial_duplicates.empty:
+                                spatial_duplicates = spatial_duplicates.sort_values('distance_m')
+                                results['spatial_duplicates'] = spatial_duplicates
+                                duplicate_counts['spatial_duplicates'] = len(spatial_duplicates)
+                    except Exception as e:
+                        st.warning(f"Erreur lors de l'analyse spatiale: {str(e)}")
         
         # Déterminer le statut global
         total_duplicates = sum(duplicate_counts.values())
@@ -484,17 +576,18 @@ def check_composite_duplicates(data, distance_threshold=1.0, match_attributes=No
             })
             
             if duplicate_counts['spatial_duplicates'] > 0:
+                desc = "Composites avec coordonnées identiques" if require_exact_coordinates else f"Composites à moins de {distance_threshold} mètres l'un de l'autre"
                 consolidated_results = pd.concat([consolidated_results, pd.DataFrame({
-                    'Type de doublon': ['Proximité spatiale'],
+                    'Type de doublon': ['Coordonnées spatiales'],
                     'Nombre détecté': [duplicate_counts['spatial_duplicates']],
-                    'Description': [f"Composites à moins de {distance_threshold} mètres l'un de l'autre"]
+                    'Description': [desc]
                 })])
             
             if duplicate_counts['identical_attributes'] > 0:
                 consolidated_results = pd.concat([consolidated_results, pd.DataFrame({
                     'Type de doublon': ['Attributs identiques'],
                     'Nombre détecté': [duplicate_counts['identical_attributes']],
-                    'Description': [f"Composites avec valeurs identiques pour {', '.join(match_attributes)}"]
+                    'Description': [f"Composites avec valeurs identiques pour {', '.join(match_attributes if match_attributes else [])}" ]
                 })])
             
             if duplicate_counts['holeid_duplicates'] > 0:
@@ -968,6 +1061,8 @@ with validate_tab:
     st.sidebar.header("Paramètres de validation")
     depth_tolerance = st.sidebar.number_input("Tolérance de profondeur (mètres)", min_value=0.0, max_value=1.0, value=0.1, step=0.01)
     distance_threshold = st.sidebar.number_input("Seuil de distance pour composites proches (mètres)", min_value=0.01, max_value=10.0, value=1.0, step=0.1)
+    exact_coords_only = st.sidebar.checkbox("Uniquement doublons avec coordonnées exactement identiques", value=True, 
+                                           help="Si activé, seuls les composites ayant exactement les mêmes coordonnées (x, y, z) seront considérés comme doublons")
     
     # Vérifier si le fichier collars est présent
     if 'collars' not in st.session_state.files:
@@ -1078,11 +1173,12 @@ with validate_tab:
                     if potential_attributes:
                         st.session_state.composite_attributes = potential_attributes
                     
-                    # Lancer l'analyse des doublons
+                    # Lancer l'analyse des doublons avec la nouvelle option pour coordonnées exactes
                     result = check_composite_duplicates(
                         composite_data, 
                         distance_threshold=distance_threshold,
-                        match_attributes=st.session_state.composite_attributes if st.session_state.composite_attributes else None
+                        match_attributes=st.session_state.composite_attributes if st.session_state.composite_attributes else None,
+                        require_exact_coordinates=exact_coords_only
                     )
                     
                     st.session_state.validation_results['composite_duplicates'] = result
@@ -1108,7 +1204,15 @@ with validate_tab:
                                         df = result['data']['details'][dup_type]
                                         
                                         if dup_type == 'spatial_duplicates':
-                                            st.write(f"**{len(df)}** paires de composites trouvées à moins de {distance_threshold} mètres l'une de l'autre:")
+                                            st.write(f"**{len(df)}** paires de composites avec {'' if exact_coords_only else 'proximité ou '}coordonnées identiques:")
+                                            
+                                            # Option de filtrage pour voir uniquement les matches exacts
+                                            if not exact_coords_only and 'is_exact_match' in df.columns:
+                                                show_only_exact = st.checkbox("Afficher uniquement les correspondances exactes", 
+                                                                              key=f"exact_only_{dup_type}_auto")
+                                                if show_only_exact:
+                                                    df = df[df['is_exact_match'] == True]
+                                                    st.info(f"Filtrage actif: {len(df)} paires ont des coordonnées exactement identiques.")
                                             
                                             # Version sécurisée pour filtrer par distance
                                             if len(df) > 0:
@@ -1141,7 +1245,20 @@ with validate_tab:
                                                     
                                                     # Filtrer le dataframe
                                                     filtered_df = df[df['distance_m'] <= max_display]
-                                                    st.dataframe(filtered_df)
+                                                    
+                                                    # Mise en valeur des correspondances exactes
+                                                    if 'is_exact_match' in filtered_df.columns:
+                                                        st.write("**Légende:** 🟢 = Coordonnées identiques (x_diff = y_diff = z_diff = 0), 🟡 = Coordonnées proches")
+                                                        
+                                                        # Créer un styler pour mettre en évidence les lignes
+                                                        styler = filtered_df.style.apply(
+                                                            lambda row: ['background-color: #d4f7d4' if row['is_exact_match'] else 
+                                                                         'background-color: #fff7d4'] * len(row), 
+                                                            axis=1
+                                                        )
+                                                        st.dataframe(styler)
+                                                    else:
+                                                        st.dataframe(filtered_df)
                                                 except Exception as e:
                                                     st.error(f"Erreur lors de la création du filtre de distance: {str(e)}")
                                                     st.dataframe(df)
@@ -1153,17 +1270,19 @@ with validate_tab:
                                                 try:
                                                     if 'filtered_df' in locals() and len(filtered_df) > 0:
                                                         # Préparer les données pour la visualisation
-                                                        # Créer une carte de base avec les points spatialement proches
                                                         fig = go.Figure()
                                                         
                                                         # Ajouter les lignes entre les paires de points
                                                         for idx, row in filtered_df.iterrows():
+                                                            # Définir la couleur en fonction du type de correspondance
+                                                            line_color = 'green' if row.get('is_exact_match', False) else 'orange'
+                                                            
                                                             fig.add_trace(go.Scatter3d(
                                                                 x=[row['x1'], row['x2']],
                                                                 y=[row['y1'], row['y2']],
                                                                 z=[row['z1'], row['z2']],
                                                                 mode='lines',
-                                                                line=dict(color='red', width=2),
+                                                                line=dict(color=line_color, width=2),
                                                                 showlegend=False
                                                             ))
                                                         
@@ -1191,6 +1310,7 @@ with validate_tab:
                                                             name='Composites'
                                                         ))
                                                         
+                                                        # Ajouter une légende
                                                         fig.update_layout(
                                                             title='Visualisation 3D des doublons spatiaux',
                                                             scene=dict(
@@ -1267,6 +1387,13 @@ with validate_tab:
                             step=0.1,
                             help="Distance maximale pour considérer deux points comme doublons spatiaux"
                         )
+                        
+                        # Option pour exiger des coordonnées exactement identiques
+                        require_exact_match = st.checkbox(
+                            "Exiger des coordonnées identiques", 
+                            value=exact_coords_only,
+                            help="Si activé, seuls les points ayant exactement les mêmes coordonnées (x_diff = y_diff = z_diff = 0) seront considérés comme doublons"
+                        )
                     
                     submitted = st.form_submit_button("Vérifier les doublons de composites")
                     
@@ -1276,11 +1403,12 @@ with validate_tab:
                             if selected_attributes:
                                 st.session_state.composite_attributes = selected_attributes
                             
-                            # Lancer l'analyse des doublons
+                            # Lancer l'analyse des doublons avec la nouvelle option pour coordonnées exactes
                             result = check_composite_duplicates(
                                 composite_data, 
                                 distance_threshold=spatial_threshold,
-                                match_attributes=selected_attributes if selected_attributes else None
+                                match_attributes=selected_attributes if selected_attributes else None,
+                                require_exact_coordinates=require_exact_match
                             )
                             
                             st.session_state.validation_results['composite_duplicates'] = result
@@ -1309,7 +1437,16 @@ with validate_tab:
                                         df = result['data']['details'][dup_type]
                                         
                                         if dup_type == 'spatial_duplicates':
-                                            st.write(f"**{len(df)}** paires de composites trouvées à moins de {spatial_threshold} mètres l'une de l'autre:")
+                                            exact_only_text = "avec coordonnées identiques" if require_exact_match else "trouvées à moins de {spatial_threshold} mètres l'une de l'autre"
+                                            st.write(f"**{len(df)}** paires de composites {exact_only_text}:")
+                                            
+                                            # Option de filtrage pour voir uniquement les matches exacts
+                                            if not require_exact_match and 'is_exact_match' in df.columns:
+                                                show_only_exact = st.checkbox("Afficher uniquement les correspondances exactes", 
+                                                                              key=f"exact_only_{dup_type}_custom")
+                                                if show_only_exact:
+                                                    df = df[df['is_exact_match'] == True]
+                                                    st.info(f"Filtrage actif: {len(df)} paires ont des coordonnées exactement identiques.")
                                             
                                             # Version sécurisée pour filtrer par distance
                                             if len(df) > 0:
@@ -1342,7 +1479,56 @@ with validate_tab:
                                                     
                                                     # Filtrer le dataframe
                                                     filtered_df = df[df['distance_m'] <= max_display]
-                                                    st.dataframe(filtered_df)
+                                                    
+                                                    # Mise en valeur des correspondances exactes
+                                                    if 'is_exact_match' in filtered_df.columns:
+                                                        st.write("**Légende:** 🟢 = Coordonnées identiques (x_diff = y_diff = z_diff = 0), 🟡 = Coordonnées proches")
+                                                        
+                                                        # Créer un styler pour mettre en évidence les lignes
+                                                        styler = filtered_df.style.apply(
+                                                            lambda row: ['background-color: #d4f7d4' if row['is_exact_match'] else 
+                                                                         'background-color: #fff7d4'] * len(row), 
+                                                            axis=1
+                                                        )
+                                                        st.dataframe(styler)
+                                                    else:
+                                                        st.dataframe(filtered_df)
+                                                    
+                                                    # Affichage des statistiques des différences
+                                                    if {'x_diff', 'y_diff', 'z_diff'}.issubset(filtered_df.columns):
+                                                        st.subheader("Statistiques des différences de coordonnées")
+                                                        stats_df = pd.DataFrame({
+                                                            'Statistique': ['Minimum', 'Maximum', 'Moyenne', 'Médiane'],
+                                                            'X diff': [
+                                                                filtered_df['x_diff'].min(), 
+                                                                filtered_df['x_diff'].max(),
+                                                                filtered_df['x_diff'].mean(),
+                                                                filtered_df['x_diff'].median()
+                                                            ],
+                                                            'Y diff': [
+                                                                filtered_df['y_diff'].min(), 
+                                                                filtered_df['y_diff'].max(),
+                                                                filtered_df['y_diff'].mean(),
+                                                                filtered_df['y_diff'].median()
+                                                            ],
+                                                            'Z diff': [
+                                                                filtered_df['z_diff'].min(), 
+                                                                filtered_df['z_diff'].max(),
+                                                                filtered_df['z_diff'].mean(),
+                                                                filtered_df['z_diff'].median()
+                                                            ],
+                                                            'Distance totale': [
+                                                                filtered_df['distance_m'].min(), 
+                                                                filtered_df['distance_m'].max(),
+                                                                filtered_df['distance_m'].mean(),
+                                                                filtered_df['distance_m'].median()
+                                                            ]
+                                                        })
+                                                        st.dataframe(stats_df)
+                                                        
+                                                        # Count de matches exacts
+                                                        exact_count = filtered_df['is_exact_match'].sum()
+                                                        st.info(f"🟢 {exact_count} paires ({exact_count/len(filtered_df)*100:.1f}%) ont des coordonnées exactement identiques")
                                                 except Exception as e:
                                                     st.error(f"Erreur lors de la création du filtre de distance: {str(e)}")
                                                     st.dataframe(df)
@@ -1371,7 +1557,6 @@ with validate_tab:
                                                     try:
                                                         if 'filtered_df' in locals() and len(filtered_df) > 0:
                                                             # Préparer les données pour la visualisation
-                                                            # Créer une carte de base avec les points spatialement proches
                                                             fig = go.Figure()
                                                             
                                                             # Vérifier que toutes les colonnes nécessaires existent
@@ -1379,12 +1564,15 @@ with validate_tab:
                                                             if all(col in filtered_df.columns for col in required_cols):
                                                                 # Ajouter les lignes entre les paires de points
                                                                 for idx, row in filtered_df.iterrows():
+                                                                    # Définir la couleur en fonction du type de correspondance
+                                                                    line_color = 'green' if row.get('is_exact_match', False) else 'orange'
+                                                                    
                                                                     fig.add_trace(go.Scatter3d(
                                                                         x=[row['x1'], row['x2']],
                                                                         y=[row['y1'], row['y2']],
                                                                         z=[row['z1'], row['z2']],
                                                                         mode='lines',
-                                                                        line=dict(color='red', width=2),
+                                                                        line=dict(color=line_color, width=2),
                                                                         showlegend=False
                                                                     ))
                                                                 
@@ -1412,6 +1600,7 @@ with validate_tab:
                                                                     name='Composites'
                                                                 ))
                                                                 
+                                                                # Ajouter une légende
                                                                 fig.update_layout(
                                                                     title='Visualisation 3D des doublons spatiaux',
                                                                     scene=dict(
@@ -1421,7 +1610,13 @@ with validate_tab:
                                                                         aspectmode='data'
                                                                     ),
                                                                     height=600,
-                                                                    margin=dict(l=0, r=0, b=0, t=30)
+                                                                    margin=dict(l=0, r=0, b=0, t=30),
+                                                                    legend=dict(
+                                                                        yanchor="top",
+                                                                        y=0.99,
+                                                                        xanchor="left",
+                                                                        x=0.01
+                                                                    )
                                                                 )
                                                                 
                                                                 st.plotly_chart(fig, use_container_width=True)
