@@ -1,0 +1,8 @@
+streamlit
+pandas
+openpyxl #(pour lire les fichiers Excel)
+matplotlib #(pour les visualisations)
+geopy #(pour le calcul des distances géodésiques)
+io
+base64
+sys
