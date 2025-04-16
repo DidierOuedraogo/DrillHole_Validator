@@ -98,6 +98,13 @@ def apply_custom_css():
             border-radius: 4px;
             font-size: 14px;
         }
+        .info-badge {
+            background-color: #5bc0de;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
         /* Section info */
         .info-box {
             background-color: #e8f4f8;
@@ -310,6 +317,8 @@ def get_status_badge(status):
         return '<span class="warning-badge">⚠ Attention</span>'
     elif status == "error":
         return '<span class="error-badge">✗ Erreur</span>'
+    elif status == "info":
+        return '<span class="info-badge">ℹ Info</span>'
     else:
         return status
 
@@ -320,20 +329,25 @@ def display_status_line(message, status):
 # Fonction pour vérifier les doublons d'échantillons composites (coordonnées proches)
 def check_composite_duplicates(data, distance_threshold):
     """Vérifie les doublons d'échantillons composites par proximité de coordonnées"""
-    if data is None or len(data) < 2:
-        return {'status': 'info', 'message': "Pas assez de données pour l'analyse.", 'data': None}
+    # Initialiser des valeurs par défaut
+    status = 'info'
+    message = "Analyse des composites proches non effectuée"
+    result_data = None
     
-    # Vérifier que les colonnes de coordonnées existent
-    coord_cols = ['x', 'y', 'z']
-    if not all(col in data.columns for col in coord_cols):
-        return {
-            'status': 'error', 
-            'message': f"Colonnes de coordonnées manquantes. Colonnes nécessaires: {', '.join(coord_cols)}",
-            'data': None
-        }
-    
-    # Extraire les coordonnées
     try:
+        if data is None or len(data) < 2:
+            return {'status': 'info', 'message': "Pas assez de données pour l'analyse.", 'data': None}
+        
+        # Vérifier que les colonnes de coordonnées existent
+        coord_cols = ['x', 'y', 'z']
+        if not all(col in data.columns for col in coord_cols):
+            return {
+                'status': 'error', 
+                'message': f"Colonnes de coordonnées manquantes. Colonnes nécessaires: {', '.join(coord_cols)}",
+                'data': None
+            }
+        
+        # Extraire les coordonnées
         # S'assurer que les coordonnées sont numériques
         coords = data[coord_cols].copy()
         for col in coord_cols:
@@ -380,71 +394,121 @@ def check_composite_duplicates(data, distance_threshold):
         # Trier par distance
         result_df.sort_values('distance', inplace=True)
         
-        return {
-            'status': 'warning',
-            'message': f"Détection de {len(result_df)} paires d'échantillons composites proches (< {distance_threshold} m)",
-            'data': result_df
-        }
+        status = 'warning'
+        message = f"Détection de {len(result_df)} paires d'échantillons composites proches (< {distance_threshold} m)"
+        result_data = result_df
     
     except Exception as e:
-        return {'status': 'error', 'message': f"Erreur lors de l'analyse: {str(e)}", 'data': None}
+        status = 'error'
+        message = f"Erreur lors de l'analyse des composites proches: {str(e)}"
+        result_data = None
+    
+    return {
+        'status': status,
+        'message': message,
+        'data': result_data
+    }
 
 # Fonction pour vérifier les forages manquants
 def check_missing_holes(collar_data, other_data, file_type):
     """Vérifie les forages manquants entre datasets"""
-    if collar_data is None or other_data is None:
-        return {'status': 'info', 'message': "Données manquantes pour l'analyse", 'data': None}
+    # Initialiser des valeurs par défaut
+    status = 'info'
+    message = "Analyse des forages manquants non effectuée"
+    result = {'missing_in_other': [], 'extra_in_other': []}
     
-    collar_ids = set(collar_data['holeid'].unique())
-    other_ids = set(other_data['holeid'].unique())
+    try:
+        if collar_data is None or other_data is None:
+            return {'status': 'info', 'message': "Données manquantes pour l'analyse", 'data': None}
+        
+        if 'holeid' not in collar_data.columns:
+            return {'status': 'error', 'message': "Colonne 'holeid' manquante dans les données collars", 'data': None}
+        
+        if 'holeid' not in other_data.columns:
+            return {'status': 'error', 'message': f"Colonne 'holeid' manquante dans les données {file_type}", 'data': None}
+        
+        collar_ids = set(collar_data['holeid'].unique())
+        other_ids = set(other_data['holeid'].unique())
+        
+        # Forages dans collar mais absents dans l'autre fichier
+        missing_in_other = collar_ids - other_ids
+        
+        # Forages dans l'autre fichier mais absents dans collar
+        extra_in_other = other_ids - collar_ids
+        
+        result = {
+            'missing_in_other': list(missing_in_other),
+            'extra_in_other': list(extra_in_other)
+        }
+        
+        # Déterminer le statut
+        if missing_in_other and extra_in_other:
+            status = 'error'
+            message = f"Problèmes de forages entre collars et {file_type}: {len(missing_in_other)} manquants, {len(extra_in_other)} en excès"
+        elif missing_in_other:
+            status = 'warning'
+            message = f"{len(missing_in_other)} forages présents dans collars mais absents dans {file_type}"
+        elif extra_in_other:
+            status = 'error'
+            message = f"{len(extra_in_other)} forages présents dans {file_type} mais absents dans collars"
+        else:
+            status = 'success'
+            message = f"Tous les forages correspondent entre collars et {file_type}"
     
-    # Forages dans collar mais absents dans l'autre fichier
-    missing_in_other = collar_ids - other_ids
-    
-    # Forages dans l'autre fichier mais absents dans collar
-    extra_in_other = other_ids - collar_ids
-    
-    result = {
-        'missing_in_other': list(missing_in_other),
-        'extra_in_other': list(extra_in_other)
-    }
-    
-    # Déterminer le statut
-    if missing_in_other and extra_in_other:
+    except Exception as e:
         status = 'error'
-    elif missing_in_other or extra_in_other:
-        status = 'warning'
-    else:
-        status = 'success'
+        message = f"Erreur lors de la vérification des forages manquants dans {file_type}: {str(e)}"
+        result = {'missing_in_other': [], 'extra_in_other': []}
     
     return {
         'status': status,
-        'message': f"Analyse des forages entre collars et {file_type}",
+        'message': message,
         'data': result
     }
 
 # Fonction pour vérifier les doublons
 def check_duplicates(data, file_type):
     """Vérifie les doublons dans un dataset"""
-    if data is None:
-        return {'status': 'info', 'message': "Données manquantes pour l'analyse", 'data': None}
-    
+    # Initialiser les variables de retour par défaut
     result = None
+    status = 'info'  # Définir une valeur par défaut pour éviter UnboundLocalError
+    message = "Analyse des doublons non effectuée"
     
-    if file_type == 'collars':
-        # Vérifier les doublons de forages dans collars
-        duplicates = data[data.duplicated(subset=['holeid'], keep=False)]
-        if not duplicates.empty:
-            status = 'error'
-            message = f"Doublons de forages détectés dans collars: {len(duplicates)} enregistrements"
-        else:
-            status = 'success'
-            message = "Aucun doublon de forage détecté dans collars"
-        result = duplicates
-    
-    elif file_type in ['assays', 'litho', 'density', 'oxidation', 'geometallurgy']:
-        # Vérifier les doublons d'intervalles
-        if all(col in data.columns for col in ['holeid', 'from', 'to']):
+    try:
+        if data is None:
+            return {'status': 'info', 'message': "Données manquantes pour l'analyse", 'data': None}
+        
+        if file_type == 'collars':
+            # Vérifier que 'holeid' existe dans les colonnes
+            if 'holeid' not in data.columns:
+                return {
+                    'status': 'error', 
+                    'message': "Colonne 'holeid' manquante dans le fichier collars", 
+                    'data': None
+                }
+            
+            # Vérifier les doublons de forages dans collars
+            duplicates = data[data.duplicated(subset=['holeid'], keep=False)]
+            if not duplicates.empty:
+                status = 'error'
+                message = f"Doublons de forages détectés dans collars: {len(duplicates)} enregistrements"
+            else:
+                status = 'success'
+                message = "Aucun doublon de forage détecté dans collars"
+            result = duplicates
+        
+        elif file_type in ['assays', 'litho', 'density', 'oxidation', 'geometallurgy']:
+            # Vérifier les colonnes nécessaires
+            required_cols = ['holeid', 'from', 'to']
+            if not all(col in data.columns for col in required_cols):
+                missing_cols = [col for col in required_cols if col not in data.columns]
+                return {
+                    'status': 'warning',
+                    'message': f"Impossible de vérifier les doublons: colonnes manquantes {missing_cols}",
+                    'data': None
+                }
+            
+            # Vérifier les doublons d'intervalles
             duplicates = data[data.duplicated(subset=['holeid', 'from', 'to'], keep=False)]
             if not duplicates.empty:
                 status = 'error'
@@ -453,13 +517,17 @@ def check_duplicates(data, file_type):
                 status = 'success'
                 message = f"Aucun doublon d'intervalle détecté dans {file_type}"
             result = duplicates
-        else:
-            status = 'warning'
-            message = f"Impossible de vérifier les doublons d'intervalles dans {file_type}: colonnes requises manquantes"
-    
-    elif file_type == 'survey':
-        # Vérifier les doublons dans les mesures de survey
-        if all(col in data.columns for col in ['holeid', 'depth']):
+        
+        elif file_type == 'survey':
+            # Vérifier les colonnes nécessaires
+            if not all(col in data.columns for col in ['holeid', 'depth']):
+                return {
+                    'status': 'warning',
+                    'message': f"Impossible de vérifier les doublons dans {file_type}: colonnes 'holeid' ou 'depth' manquantes",
+                    'data': None
+                }
+            
+            # Vérifier les doublons dans les mesures de survey
             duplicates = data[data.duplicated(subset=['holeid', 'depth'], keep=False)]
             if not duplicates.empty:
                 status = 'error'
@@ -468,21 +536,55 @@ def check_duplicates(data, file_type):
                 status = 'success'
                 message = f"Aucun doublon de mesure détecté dans {file_type}"
             result = duplicates
-        else:
-            status = 'warning'
-            message = f"Impossible de vérifier les doublons dans {file_type}: colonnes requises manquantes"
-    
-    # Vérifier les doublons d'échantillons si la colonne sampleid existe
-    if 'sampleid' in data.columns:
-        sample_duplicates = data[data.duplicated(subset=['sampleid'], keep=False)]
-        if not sample_duplicates.empty:
-            status = 'error'
-            message += f" | Doublons d'identifiants d'échantillons détectés: {len(sample_duplicates)} enregistrements"
-            if result is None:
-                result = sample_duplicates
+        
+        elif file_type == 'composites':
+            # Vérifier si holeid existe
+            if 'holeid' not in data.columns:
+                return {
+                    'status': 'warning',
+                    'message': f"Impossible de vérifier les doublons dans {file_type}: colonne 'holeid' manquante",
+                    'data': None
+                }
+            
+            # Vérifier les doublons de composites
+            duplicates = data[data.duplicated(subset=['holeid'], keep=False)]
+            if not duplicates.empty:
+                status = 'error'
+                message = f"Doublons de composites détectés dans {file_type}: {len(duplicates)} enregistrements"
             else:
-                result = pd.concat([result, sample_duplicates]).drop_duplicates()
+                status = 'success'
+                message = f"Aucun doublon de composite détecté dans {file_type}"
+            result = duplicates
+        
+        else:
+            # Type de fichier non reconnu
+            status = 'info'
+            message = f"Type de fichier {file_type} non pris en charge pour la vérification des doublons"
+        
+        # Vérifier les doublons d'échantillons si la colonne sampleid existe
+        if 'sampleid' in data.columns:
+            sample_duplicates = data[data.duplicated(subset=['sampleid'], keep=False)]
+            if not sample_duplicates.empty:
+                # Si on a déjà des erreurs, on ajoute à l'information
+                if status == 'error':
+                    message += f" | Doublons d'identifiants d'échantillons détectés: {len(sample_duplicates)} enregistrements"
+                else:
+                    status = 'error'
+                    message = f"Doublons d'identifiants d'échantillons détectés dans {file_type}: {len(sample_duplicates)} enregistrements"
+                
+                if result is None:
+                    result = sample_duplicates
+                else:
+                    # Concaténer sans doublons
+                    result = pd.concat([result, sample_duplicates]).drop_duplicates()
     
+    except Exception as e:
+        # Capturer toute autre exception
+        status = 'error'
+        message = f"Erreur lors de la vérification des doublons dans {file_type}: {str(e)}"
+        result = None
+    
+    # Retourner le résultat
     return {
         'status': status,
         'message': message,
@@ -492,58 +594,100 @@ def check_duplicates(data, file_type):
 # Fonction pour vérifier les intervalles de profondeur
 def check_interval_depths(collar_data, interval_data, file_type, tolerance=0.1):
     """Vérifie les intervalles de profondeur par rapport aux profondeurs maximales des forages"""
-    if collar_data is None or interval_data is None:
-        return {'status': 'info', 'message': "Données manquantes pour l'analyse", 'data': None}
+    # Initialiser des valeurs par défaut
+    status = 'info'
+    message = "Analyse des intervalles de profondeur non effectuée"
+    results_df = pd.DataFrame()
     
-    if 'depth' not in collar_data.columns:
-        return {'status': 'error', 'message': "Colonne 'depth' manquante dans les données de collars", 'data': None}
-    
-    if not all(col in interval_data.columns for col in ['holeid', 'from', 'to']):
-        return {'status': 'error', 'message': "Colonnes requises ('holeid', 'from', 'to') manquantes dans les données d'intervalle", 'data': None}
-    
-    # Créer un dictionnaire des profondeurs maximales pour chaque forage
-    max_depths = dict(zip(collar_data['holeid'], collar_data['depth']))
-    
-    # Vérifier chaque intervalle
-    issues = []
-    for idx, row in interval_data.iterrows():
-        hole_id = row['holeid']
-        from_depth = row['from']
-        to_depth = row['to']
+    try:
+        if collar_data is None or interval_data is None:
+            return {'status': 'info', 'message': "Données manquantes pour l'analyse", 'data': None}
         
-        # Vérifier si le forage existe dans collar
-        if hole_id in max_depths:
-            max_depth = max_depths[hole_id]
+        if 'depth' not in collar_data.columns:
+            return {'status': 'error', 'message': f"Colonne 'depth' manquante dans les données de collars", 'data': None}
+        
+        if not all(col in interval_data.columns for col in ['holeid', 'from', 'to']):
+            missing_cols = [col for col in ['holeid', 'from', 'to'] if col not in interval_data.columns]
+            return {
+                'status': 'error', 
+                'message': f"Colonnes requises manquantes dans {file_type}: {', '.join(missing_cols)}", 
+                'data': None
+            }
+        
+        # Vérifier les types de données
+        for col in ['from', 'to']:
+            if not pd.api.types.is_numeric_dtype(interval_data[col]):
+                try:
+                    interval_data[col] = pd.to_numeric(interval_data[col], errors='coerce')
+                except:
+                    return {
+                        'status': 'error',
+                        'message': f"Impossible de convertir la colonne '{col}' en type numérique dans {file_type}",
+                        'data': None
+                    }
+        
+        # Créer un dictionnaire des profondeurs maximales pour chaque forage
+        max_depths = dict(zip(collar_data['holeid'], collar_data['depth']))
+        
+        # Vérifier chaque intervalle
+        issues = []
+        for idx, row in interval_data.iterrows():
+            hole_id = row['holeid']
+            from_depth = row['from']
+            to_depth = row['to']
             
-            # Vérifier si les profondeurs sont valides
-            if to_depth > max_depth + tolerance:
+            # Vérifier les valeurs nulles
+            if pd.isna(from_depth) or pd.isna(to_depth):
                 issues.append({
                     'index': idx,
                     'holeid': hole_id,
                     'from': from_depth,
                     'to': to_depth,
-                    'max_depth': max_depth,
-                    'issue': f"La profondeur 'to' ({to_depth}) dépasse la profondeur maximale du forage ({max_depth})"
+                    'max_depth': max_depths.get(hole_id, 'N/A'),
+                    'issue': "Valeurs 'from' ou 'to' manquantes"
                 })
+                continue
             
-            if from_depth > to_depth:
-                issues.append({
-                    'index': idx,
-                    'holeid': hole_id,
-                    'from': from_depth,
-                    'to': to_depth,
-                    'max_depth': max_depth,
-                    'issue': f"La profondeur 'from' ({from_depth}) est supérieure à 'to' ({to_depth})"
-                })
-    
-    results_df = pd.DataFrame(issues) if issues else pd.DataFrame()
-    
-    if len(issues) > 0:
+            # Vérifier si le forage existe dans collar
+            if hole_id in max_depths:
+                max_depth = max_depths[hole_id]
+                
+                # Vérifier si les profondeurs sont valides
+                if to_depth > max_depth + tolerance:
+                    issues.append({
+                        'index': idx,
+                        'holeid': hole_id,
+                        'from': from_depth,
+                        'to': to_depth,
+                        'max_depth': max_depth,
+                        'issue': f"La profondeur 'to' ({to_depth}) dépasse la profondeur maximale du forage ({max_depth})"
+                    })
+                
+                if from_depth > to_depth:
+                    issues.append({
+                        'index': idx,
+                        'holeid': hole_id,
+                        'from': from_depth,
+                        'to': to_depth,
+                        'max_depth': max_depth,
+                        'issue': f"La profondeur 'from' ({from_depth}) est supérieure à 'to' ({to_depth})"
+                    })
+        
+        # Créer le DataFrame de résultats
+        results_df = pd.DataFrame(issues) if issues else pd.DataFrame()
+        
+        # Déterminer le statut
+        if len(issues) > 0:
+            status = 'error'
+            message = f"Problèmes d'intervalles détectés dans {file_type}: {len(issues)} intervalles problématiques"
+        else:
+            status = 'success'
+            message = f"Aucun problème d'intervalle détecté dans {file_type}"
+            
+    except Exception as e:
         status = 'error'
-        message = f"Problèmes d'intervalles détectés dans {file_type}: {len(issues)} intervalles problématiques"
-    else:
-        status = 'success'
-        message = f"Aucun problème d'intervalle détecté dans {file_type}"
+        message = f"Erreur lors de la vérification des intervalles dans {file_type}: {str(e)}"
+        results_df = pd.DataFrame()
     
     return {
         'status': status,
@@ -675,7 +819,7 @@ with validate_tab:
                     st.session_state.report_data['validation_results'][f'duplicates_{file_type}'] = {
                         'status': result['status'],
                         'message': result['message'],
-                        'count': len(result['data']) if result['data'] is not None else 0
+                        'count': len(result['data']) if result['data'] is not None and isinstance(result['data'], pd.DataFrame) else 0
                     }
                 
                 # Analyse 2: Vérification des forages manquants
@@ -689,18 +833,18 @@ with validate_tab:
                         if result['status'] == 'success':
                             st.success(f"Tous les forages dans {file_type} correspondent aux collars")
                         else:
-                            if result['data']['missing_in_other']:
+                            if result['data'] and 'missing_in_other' in result['data'] and result['data']['missing_in_other']:
                                 st.warning(f"{len(result['data']['missing_in_other'])} forages dans collars sont absents de {file_type}")
                             
-                            if result['data']['extra_in_other']:
+                            if result['data'] and 'extra_in_other' in result['data'] and result['data']['extra_in_other']:
                                 st.error(f"{len(result['data']['extra_in_other'])} forages dans {file_type} sont absents de collars")
                         
                         # Ajouter au rapport
                         st.session_state.report_data['validation_results'][f'missing_holes_{file_type}'] = {
                             'status': result['status'],
                             'message': result['message'],
-                            'missing_count': len(result['data']['missing_in_other']) if result['data'] else 0,
-                            'extra_count': len(result['data']['extra_in_other']) if result['data'] else 0
+                            'missing_count': len(result['data']['missing_in_other']) if result['data'] and 'missing_in_other' in result['data'] else 0,
+                            'extra_count': len(result['data']['extra_in_other']) if result['data'] and 'extra_in_other' in result['data'] else 0
                         }
                 
                 # Analyse 3: Vérification des intervalles de profondeur
@@ -715,7 +859,7 @@ with validate_tab:
                         
                         display_status_line(result['message'], result['status'])
                         
-                        if result['status'] == 'error':
+                        if result['status'] == 'error' and result['data'] is not None and not result['data'].empty:
                             with st.expander("Voir les détails des problèmes d'intervalles"):
                                 st.dataframe(result['data'])
                         
@@ -750,12 +894,14 @@ with validate_tab:
                 success_count = sum(1 for result in st.session_state.validation_results.values() if result['status'] == 'success')
                 warning_count = sum(1 for result in st.session_state.validation_results.values() if result['status'] == 'warning')
                 error_count = sum(1 for result in st.session_state.validation_results.values() if result['status'] == 'error')
+                info_count = sum(1 for result in st.session_state.validation_results.values() if result['status'] == 'info')
                 
                 st.session_state.report_data['summary'] = {
                     'total_validations': len(st.session_state.validation_results),
                     'success_count': success_count,
                     'warning_count': warning_count,
-                    'error_count': error_count
+                    'error_count': error_count,
+                    'info_count': info_count
                 }
                 
                 st.success(f"Validation terminée: {success_count} succès, {warning_count} avertissements, {error_count} erreurs")
@@ -871,21 +1017,28 @@ with report_tab:
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Validations totales", report['summary']['total_validations'])
+            st.metric("Validations totales", report['summary'].get('total_validations', 0))
         
         with col2:
-            st.metric("Succès", report['summary']['success_count'], delta=f"{report['summary']['success_count']/report['summary']['total_validations']*100:.0f}%")
+            success_count = report['summary'].get('success_count', 0)
+            total_validations = report['summary'].get('total_validations', 1)  # Éviter division par zéro
+            success_pct = success_count/total_validations*100 if total_validations > 0 else 0
+            st.metric("Succès", success_count, delta=f"{success_pct:.0f}%")
         
         with col3:
-            st.metric("Avertissements", report['summary']['warning_count'], delta=f"{report['summary']['warning_count']/report['summary']['total_validations']*100:.0f}%")
+            warning_count = report['summary'].get('warning_count', 0)
+            warning_pct = warning_count/total_validations*100 if total_validations > 0 else 0
+            st.metric("Avertissements", warning_count, delta=f"{warning_pct:.0f}%")
         
         with col4:
-            st.metric("Erreurs", report['summary']['error_count'], delta=f"{report['summary']['error_count']/report['summary']['total_validations']*100:.0f}%")
+            error_count = report['summary'].get('error_count', 0)
+            error_pct = error_count/total_validations*100 if total_validations > 0 else 0
+            st.metric("Erreurs", error_count, delta=f"{error_pct:.0f}%")
         
         # Statut global
-        if report['summary']['error_count'] > 0:
+        if report['summary'].get('error_count', 0) > 0:
             st.error("⚠️ Le jeu de données présente des erreurs importantes qui doivent être corrigées.")
-        elif report['summary']['warning_count'] > 0:
+        elif report['summary'].get('warning_count', 0) > 0:
             st.warning("⚠️ Le jeu de données présente quelques problèmes mineurs qui pourraient nécessiter votre attention.")
         else:
             st.success("✅ Le jeu de données a passé toutes les validations avec succès!")
@@ -916,9 +1069,10 @@ with report_tab:
         with col1:
             # Graphique des statuts
             status_counts = {
-                'Succès': report['summary']['success_count'],
-                'Avertissements': report['summary']['warning_count'],
-                'Erreurs': report['summary']['error_count']
+                'Succès': report['summary'].get('success_count', 0),
+                'Avertissements': report['summary'].get('warning_count', 0),
+                'Erreurs': report['summary'].get('error_count', 0),
+                'Infos': report['summary'].get('info_count', 0)
             }
             
             status_df = pd.DataFrame({
@@ -926,32 +1080,48 @@ with report_tab:
                 'Nombre': list(status_counts.values())
             })
             
-            fig = px.pie(status_df, values='Nombre', names='Statut', 
-                         title='Répartition des statuts de validation',
-                         color='Statut',
-                         color_discrete_map={
-                             'Succès': '#5cb85c',
-                             'Avertissements': '#f0ad4e',
-                             'Erreurs': '#d9534f'
-                         })
-            fig.update_traces(textposition='inside', textinfo='percent+label')
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
+            # Éliminer les statuts avec 0 valeurs pour une meilleure visualisation
+            status_df = status_df[status_df['Nombre'] > 0]
+            
+            # Éviter l'erreur si tous les statuts sont à 0
+            if not status_df.empty:
+                fig = px.pie(status_df, values='Nombre', names='Statut', 
+                            title='Répartition des statuts de validation',
+                            color='Statut',
+                            color_discrete_map={
+                                'Succès': '#5cb85c',
+                                'Avertissements': '#f0ad4e',
+                                'Erreurs': '#d9534f',
+                                'Infos': '#5bc0de'
+                            })
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Pas de données de statut disponibles pour la visualisation.")
         
         with col2:
             # Graphique des problèmes par type de validation
             problems_df = report_df.sort_values('Problèmes détectés', ascending=False)
             
-            fig = px.bar(problems_df, x='Type de validation', y='Problèmes détectés',
-                         title='Nombre de problèmes par type de validation',
-                         color='Statut',
-                         color_discrete_map={
-                             'SUCCESS': '#5cb85c',
-                             'WARNING': '#f0ad4e',
-                             'ERROR': '#d9534f'
-                         })
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
+            # Éliminer les lignes sans problèmes pour une meilleure visualisation
+            problems_df = problems_df[problems_df['Problèmes détectés'] > 0]
+            
+            # Éviter l'erreur si aucun problème n'est détecté
+            if not problems_df.empty:
+                fig = px.bar(problems_df, x='Type de validation', y='Problèmes détectés',
+                            title='Nombre de problèmes par type de validation',
+                            color='Statut',
+                            color_discrete_map={
+                                'SUCCESS': '#5cb85c',
+                                'WARNING': '#f0ad4e',
+                                'ERROR': '#d9534f',
+                                'INFO': '#5bc0de'
+                            })
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.success("Aucun problème détecté dans les données!")
         
         # Distribution des profondeurs de forage si disponible
         if 'collars' in st.session_state.files and 'depth' in st.session_state.files['collars'].columns:
@@ -959,11 +1129,15 @@ with report_tab:
             
             collar_depths = st.session_state.files['collars']['depth'].dropna()
             
-            fig = px.histogram(collar_depths, nbins=30,
-                              labels={'value': 'Profondeur (m)', 'count': 'Nombre de forages'},
-                              title='Distribution des profondeurs de forage')
-            fig.update_layout(bargap=0.1)
-            st.plotly_chart(fig, use_container_width=True)
+            # Vérifier que collar_depths contient des données numériques et non vides
+            if len(collar_depths) > 0 and pd.api.types.is_numeric_dtype(collar_depths):
+                fig = px.histogram(collar_depths, nbins=30,
+                                labels={'value': 'Profondeur (m)', 'count': 'Nombre de forages'},
+                                title='Distribution des profondeurs de forage')
+                fig.update_layout(bargap=0.1)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Les données de profondeur ne sont pas disponibles ou ne sont pas numériques.")
         
         # Afficher la distribution spatiale des forages si les coordonnées sont disponibles
         if 'collars' in st.session_state.files and all(col in st.session_state.files['collars'].columns for col in ['x', 'y']):
@@ -971,19 +1145,30 @@ with report_tab:
             
             collars = st.session_state.files['collars']
             
-            fig = px.scatter(collars, x='x', y='y', 
-                            hover_name='holeid' if 'holeid' in collars.columns else None,
-                            hover_data=['depth'] if 'depth' in collars.columns else None,
-                            color='depth' if 'depth' in collars.columns else None,
-                            title='Carte des emplacements de forage')
-            
-            fig.update_layout(
-                autosize=True,
-                height=600,
-                margin=dict(l=50, r=50, b=100, t=100, pad=4),
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+            # Vérifier que les coordonnées contiennent des données numériques
+            if (pd.api.types.is_numeric_dtype(collars['x']) and 
+                pd.api.types.is_numeric_dtype(collars['y']) and 
+                not collars['x'].isna().all() and 
+                not collars['y'].isna().all()):
+                
+                # Créer un dataframe sans valeurs manquantes pour la visualisation
+                plot_data = collars.dropna(subset=['x', 'y']).copy()
+                
+                fig = px.scatter(plot_data, x='x', y='y', 
+                                hover_name='holeid' if 'holeid' in plot_data.columns else None,
+                                hover_data=['depth'] if 'depth' in plot_data.columns else None,
+                                color='depth' if 'depth' in plot_data.columns else None,
+                                title='Carte des emplacements de forage')
+                
+                fig.update_layout(
+                    autosize=True,
+                    height=600,
+                    margin=dict(l=50, r=50, b=100, t=100, pad=4),
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Les données de coordonnées ne sont pas disponibles ou ne sont pas numériques.")
         
         # Exportation du rapport complet
         st.subheader("Exporter le rapport complet")
@@ -1025,19 +1210,19 @@ with report_tab:
                     
                     <div class="summary">
                         <div class="summary-card info">
-                            <h3>{report['summary']['total_validations']}</h3>
+                            <h3>{report['summary'].get('total_validations', 0)}</h3>
                             <p>Validations totales</p>
                         </div>
                         <div class="summary-card success">
-                            <h3>{report['summary']['success_count']}</h3>
+                            <h3>{report['summary'].get('success_count', 0)}</h3>
                             <p>Succès</p>
                         </div>
                         <div class="summary-card warning">
-                            <h3>{report['summary']['warning_count']}</h3>
+                            <h3>{report['summary'].get('warning_count', 0)}</h3>
                             <p>Avertissements</p>
                         </div>
                         <div class="summary-card error">
-                            <h3>{report['summary']['error_count']}</h3>
+                            <h3>{report['summary'].get('error_count', 0)}</h3>
                             <p>Erreurs</p>
                         </div>
                     </div>
@@ -1081,13 +1266,13 @@ with report_tab:
                     <h2>Conclusion</h2>
             """
             
-            if report['summary']['error_count'] > 0:
+            if report['summary'].get('error_count', 0) > 0:
                 html_content += """
                     <div class="error" style="padding: 15px; border-radius: 5px;">
                         <p>⚠️ Le jeu de données présente des erreurs importantes qui doivent être corrigées.</p>
                     </div>
                 """
-            elif report['summary']['warning_count'] > 0:
+            elif report['summary'].get('warning_count', 0) > 0:
                 html_content += """
                     <div class="warning" style="padding: 15px; border-radius: 5px;">
                         <p>⚠️ Le jeu de données présente quelques problèmes mineurs qui pourraient nécessiter votre attention.</p>
