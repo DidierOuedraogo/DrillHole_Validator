@@ -134,6 +134,8 @@ if 'validation_results' not in st.session_state:
     st.session_state.validation_results = {}
 if 'report_data' not in st.session_state:
     st.session_state.report_data = {}
+if 'composite_attributes' not in st.session_state:
+    st.session_state.composite_attributes = []
 
 # Titre et description de l'application
 st.title("🔍 Validation des Données de Forage Minier")
@@ -326,87 +328,210 @@ def display_status_line(message, status):
     """Affiche une ligne avec un badge de statut"""
     st.markdown(f"{get_status_badge(status)} {message}", unsafe_allow_html=True)
 
-# Fonction pour vérifier les doublons d'échantillons composites (coordonnées proches)
-def check_composite_duplicates(data, distance_threshold):
-    """Vérifie les doublons d'échantillons composites par proximité de coordonnées"""
+# Fonction améliorée pour vérifier les doublons d'échantillons composites
+def check_composite_duplicates(data, distance_threshold=1.0, match_attributes=None):
+    """
+    Vérifie les doublons d'échantillons composites en utilisant différentes méthodes.
+    
+    Parameters:
+    -----------
+    data : DataFrame
+        Les données de composites à analyser
+    distance_threshold : float
+        Seuil de distance (mètres) pour les doublons spatiaux
+    match_attributes : list
+        Liste des attributs à comparer pour détecter des doublons (ex: ['Au', 'Cu'])
+        
+    Returns:
+    --------
+    dict
+        Résultats de la validation avec le statut, message et données détaillées
+    """
     # Initialiser des valeurs par défaut
     status = 'info'
-    message = "Analyse des composites proches non effectuée"
+    message = "Analyse des composites non effectuée"
     result_data = None
     
     try:
         if data is None or len(data) < 2:
             return {'status': 'info', 'message': "Pas assez de données pour l'analyse.", 'data': None}
         
-        # Vérifier que les colonnes de coordonnées existent
+        results = {
+            'spatial_duplicates': None,  # Doublons par coordonnées
+            'identical_attributes': None,  # Doublons par attributs identiques
+            'holeid_duplicates': None,  # Doublons par holeid
+            'sampleid_duplicates': None  # Doublons par sampleid
+        }
+        duplicate_counts = {k: 0 for k in results.keys()}
+        
+        # 1. Vérification des doublons par identifiants
+        if 'holeid' in data.columns:
+            holeid_duplicates = data[data.duplicated(subset=['holeid'], keep=False)]
+            if not holeid_duplicates.empty:
+                results['holeid_duplicates'] = holeid_duplicates
+                duplicate_counts['holeid_duplicates'] = len(holeid_duplicates)
+        
+        if 'sampleid' in data.columns:
+            sampleid_duplicates = data[data.duplicated(subset=['sampleid'], keep=False)]
+            if not sampleid_duplicates.empty:
+                results['sampleid_duplicates'] = sampleid_duplicates
+                duplicate_counts['sampleid_duplicates'] = len(sampleid_duplicates)
+                
+        # 2. Vérification des doublons par attributs identiques
+        if match_attributes and all(attr in data.columns for attr in match_attributes):
+            attr_duplicates = data[data.duplicated(subset=match_attributes, keep=False)]
+            if not attr_duplicates.empty:
+                results['identical_attributes'] = attr_duplicates
+                duplicate_counts['identical_attributes'] = len(attr_duplicates)
+        
+        # 3. Vérification des doublons par proximité spatiale
         coord_cols = ['x', 'y', 'z']
-        if not all(col in data.columns for col in coord_cols):
-            return {
-                'status': 'error', 
-                'message': f"Colonnes de coordonnées manquantes. Colonnes nécessaires: {', '.join(coord_cols)}",
-                'data': None
-            }
-        
-        # Extraire les coordonnées
-        # S'assurer que les coordonnées sont numériques
-        coords = data[coord_cols].copy()
-        for col in coord_cols:
-            if not pd.api.types.is_numeric_dtype(coords[col]):
-                coords[col] = pd.to_numeric(coords[col], errors='coerce')
-        
-        # Supprimer les lignes avec des valeurs manquantes
-        coords.dropna(inplace=True)
-        if len(coords) < 2:
-            return {'status': 'warning', 'message': "Pas assez de coordonnées valides pour l'analyse.", 'data': None}
-        
-        # Utiliser KDTree pour trouver les paires proches
-        tree = KDTree(coords.values)
-        pairs = tree.query_pairs(distance_threshold, output_type='ndarray')
-        
-        if len(pairs) == 0:
-            return {'status': 'success', 'message': f"Aucun doublon trouvé à moins de {distance_threshold} mètres", 'data': None}
-        
-        # Créer un DataFrame avec les détails des paires trouvées
-        result_rows = []
-        for i, j in pairs:
-            i, j = int(i), int(j)
-            point1 = coords.iloc[i].values
-            point2 = coords.iloc[j].values
-            distance = np.linalg.norm(point1 - point2)
+        if all(col in data.columns for col in coord_cols):
+            # S'assurer que les coordonnées sont numériques
+            coords_data = data.copy()
+            for col in coord_cols:
+                if not pd.api.types.is_numeric_dtype(coords_data[col]):
+                    coords_data[col] = pd.to_numeric(coords_data[col], errors='coerce')
             
-            # Créer une entrée pour chaque paire
-            result_rows.append({
-                'index1': coords.index[i],
-                'index2': coords.index[j],
-                'holeid1': data.iloc[i]['holeid'] if 'holeid' in data.columns else f"ID_{i}",
-                'holeid2': data.iloc[j]['holeid'] if 'holeid' in data.columns else f"ID_{j}",
-                'x1': point1[0],
-                'y1': point1[1],
-                'z1': point1[2],
-                'x2': point2[0],
-                'y2': point2[1],
-                'z2': point2[2],
-                'distance': distance
+            # Supprimer les lignes avec des valeurs manquantes
+            coords_data = coords_data.dropna(subset=coord_cols)
+            
+            if len(coords_data) >= 2:
+                # Extraire les coordonnées pour la recherche spatiale
+                coords = coords_data[coord_cols].values
+                
+                # Utiliser KDTree pour trouver efficacement les paires proches
+                from scipy.spatial import KDTree
+                tree = KDTree(coords)
+                pairs = tree.query_pairs(distance_threshold, output_type='ndarray')
+                
+                if len(pairs) > 0:
+                    # Créer un DataFrame avec les détails des paires trouvées
+                    result_rows = []
+                    for i, j in pairs:
+                        i, j = int(i), int(j)
+                        # Indices dans le DataFrame filtré (sans NA)
+                        orig_idx1 = coords_data.index[i]
+                        orig_idx2 = coords_data.index[j]
+                        
+                        point1 = coords[i]
+                        point2 = coords[j]
+                        distance = np.linalg.norm(point1 - point2)
+                        
+                        row1 = coords_data.loc[orig_idx1].to_dict()
+                        row2 = coords_data.loc[orig_idx2].to_dict()
+                        
+                        # Créer une entrée détaillée pour chaque paire
+                        entry = {
+                            'index1': orig_idx1,
+                            'index2': orig_idx2,
+                            'distance_m': distance,
+                            'holeid1': coords_data.loc[orig_idx1, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{orig_idx1}",
+                            'holeid2': coords_data.loc[orig_idx2, 'holeid'] if 'holeid' in coords_data.columns else f"ID_{orig_idx2}",
+                        }
+                        
+                        # Ajouter les coordonnées
+                        for col in coord_cols:
+                            entry[f"{col}1"] = row1[col]
+                            entry[f"{col}2"] = row2[col]
+                        
+                        # Ajouter les attributs comparés si disponibles
+                        if match_attributes:
+                            for attr in match_attributes:
+                                if attr in coords_data.columns:
+                                    entry[f"{attr}1"] = row1.get(attr, None)
+                                    entry[f"{attr}2"] = row2.get(attr, None)
+                                    
+                                    # Calculer la différence pour les attributs numériques
+                                    if pd.api.types.is_numeric_dtype(coords_data[attr]):
+                                        val1 = row1.get(attr, 0)
+                                        val2 = row2.get(attr, 0)
+                                        if val1 is not None and val2 is not None:
+                                            entry[f"{attr}_diff"] = abs(val1 - val2)
+                                            if val1 != 0:  # Éviter division par zéro
+                                                entry[f"{attr}_pct_diff"] = abs(val1 - val2) / abs(val1) * 100
+                        
+                        result_rows.append(entry)
+                    
+                    # Créer le DataFrame de résultats et trier par distance
+                    spatial_duplicates = pd.DataFrame(result_rows)
+                    if not spatial_duplicates.empty:
+                        spatial_duplicates = spatial_duplicates.sort_values('distance_m')
+                        results['spatial_duplicates'] = spatial_duplicates
+                        duplicate_counts['spatial_duplicates'] = len(spatial_duplicates)
+        
+        # Déterminer le statut global
+        total_duplicates = sum(duplicate_counts.values())
+        
+        if total_duplicates > 0:
+            # Regrouper les résultats pour le rapport
+            consolidated_results = pd.DataFrame({
+                'Type de doublon': [],
+                'Nombre détecté': [],
+                'Description': []
             })
-        
-        result_df = pd.DataFrame(result_rows)
-        
-        # Trier par distance
-        result_df.sort_values('distance', inplace=True)
-        
-        status = 'warning'
-        message = f"Détection de {len(result_df)} paires d'échantillons composites proches (< {distance_threshold} m)"
-        result_data = result_df
+            
+            if duplicate_counts['spatial_duplicates'] > 0:
+                consolidated_results = pd.concat([consolidated_results, pd.DataFrame({
+                    'Type de doublon': ['Proximité spatiale'],
+                    'Nombre détecté': [duplicate_counts['spatial_duplicates']],
+                    'Description': [f"Composites à moins de {distance_threshold} mètres l'un de l'autre"]
+                })])
+            
+            if duplicate_counts['identical_attributes'] > 0:
+                consolidated_results = pd.concat([consolidated_results, pd.DataFrame({
+                    'Type de doublon': ['Attributs identiques'],
+                    'Nombre détecté': [duplicate_counts['identical_attributes']],
+                    'Description': [f"Composites avec valeurs identiques pour {', '.join(match_attributes)}"]
+                })])
+            
+            if duplicate_counts['holeid_duplicates'] > 0:
+                consolidated_results = pd.concat([consolidated_results, pd.DataFrame({
+                    'Type de doublon': ['Identifiants de forage'],
+                    'Nombre détecté': [duplicate_counts['holeid_duplicates']],
+                    'Description': ["Composites avec identifiant de forage (holeid) dupliqué"]
+                })])
+            
+            if duplicate_counts['sampleid_duplicates'] > 0:
+                consolidated_results = pd.concat([consolidated_results, pd.DataFrame({
+                    'Type de doublon': ['Identifiants d\'échantillon'],
+                    'Nombre détecté': [duplicate_counts['sampleid_duplicates']],
+                    'Description': ["Composites avec identifiant d'échantillon (sampleid) dupliqué"]
+                })])
+            
+            # Déterminer le statut basé sur la gravité
+            if (duplicate_counts['holeid_duplicates'] > 0 or 
+                duplicate_counts['sampleid_duplicates'] > 0):
+                status = 'error'
+            elif duplicate_counts['spatial_duplicates'] > 0:
+                status = 'warning'
+            else:
+                status = 'info'
+            
+            message = f"Détection de {total_duplicates} doublons potentiels parmi les composites"
+            
+            # Regrouper tous les résultats dans un dictionnaire
+            result_data = {
+                'summary': consolidated_results,
+                'details': {k: v for k, v in results.items() if v is not None}
+            }
+        else:
+            status = 'success'
+            message = "Aucun doublon détecté parmi les composites"
+            result_data = None
     
     except Exception as e:
         status = 'error'
-        message = f"Erreur lors de l'analyse des composites proches: {str(e)}"
+        message = f"Erreur lors de l'analyse des doublons de composites: {str(e)}"
         result_data = None
+        import traceback
+        traceback.print_exc()
     
     return {
         'status': status,
         'message': message,
-        'data': result_data
+        'data': result_data,
+        'counts': duplicate_counts if 'duplicate_counts' in locals() else {}
     }
 
 # Fonction pour vérifier les forages manquants
@@ -811,16 +936,18 @@ with validate_tab:
                 st.subheader("Vérification des doublons")
                 
                 for file_type, file_data in st.session_state.files.items():
-                    result = check_duplicates(file_data, file_type)
-                    st.session_state.validation_results[f'duplicates_{file_type}'] = result
-                    display_status_line(result['message'], result['status'])
-                    
-                    # Ajouter au rapport
-                    st.session_state.report_data['validation_results'][f'duplicates_{file_type}'] = {
-                        'status': result['status'],
-                        'message': result['message'],
-                        'count': len(result['data']) if result['data'] is not None and isinstance(result['data'], pd.DataFrame) else 0
-                    }
+                    # Ne pas vérifier les doublons simples pour les composites, nous utiliserons l'approche spécifique
+                    if file_type != 'composites':
+                        result = check_duplicates(file_data, file_type)
+                        st.session_state.validation_results[f'duplicates_{file_type}'] = result
+                        display_status_line(result['message'], result['status'])
+                        
+                        # Ajouter au rapport
+                        st.session_state.report_data['validation_results'][f'duplicates_{file_type}'] = {
+                            'status': result['status'],
+                            'message': result['message'],
+                            'count': len(result['data']) if result['data'] is not None and isinstance(result['data'], pd.DataFrame) else 0
+                        }
                 
                 # Analyse 2: Vérification des forages manquants
                 st.subheader("Vérification des forages manquants")
@@ -870,24 +997,146 @@ with validate_tab:
                             'count': len(result['data']) if result['data'] is not None else 0
                         }
                 
-                # Analyse 4: Vérification des composites proches
+                # Analyse 4: Vérification des doublons de composites
                 if 'composites' in st.session_state.files:
-                    st.subheader("Vérification des composites proches")
+                    st.subheader("Vérification des doublons de composites")
                     
-                    result = check_composite_duplicates(st.session_state.files['composites'], distance_threshold)
+                    # Collecter les attributs à comparer pour les doublons
+                    composite_data = st.session_state.files['composites']
+                    
+                    # Essayer de deviner les colonnes d'attributs pertinentes (ex: teneurs métalliques)
+                    potential_attributes = []
+                    numeric_cols = composite_data.select_dtypes(include=['number']).columns.tolist()
+                    
+                    # Exclure les colonnes standard de coordonnées et identifiants
+                    exclude_cols = ['x', 'y', 'z', 'east', 'north', 'depth', 'holeid', 'from', 'to', 'sampleid', 'length', 'elevation']
+                    
+                    # Heuristique pour trouver des colonnes potentiellement d'intérêt (métaux, teneurs)
+                    metal_prefixes = ['au', 'ag', 'cu', 'zn', 'pb', 'ni', 'co', 'fe', 'mn', 'cr', 'al', 'grade', 'teneur']
+                    
+                    for col in numeric_cols:
+                        if col.lower() not in [e.lower() for e in exclude_cols]:
+                            # Si la colonne est un symbole chimique ou contient un préfixe métallique
+                            if (len(col) <= 3 or 
+                                any(col.lower().startswith(prefix) for prefix in metal_prefixes) or
+                                any(prefix in col.lower() for prefix in metal_prefixes)):
+                                potential_attributes.append(col)
+                    
+                    if potential_attributes:
+                        st.session_state.composite_attributes = potential_attributes
+                    
+                    # Lancer l'analyse des doublons
+                    result = check_composite_duplicates(
+                        composite_data, 
+                        distance_threshold=distance_threshold,
+                        match_attributes=st.session_state.composite_attributes if st.session_state.composite_attributes else None
+                    )
+                    
                     st.session_state.validation_results['composite_duplicates'] = result
                     
+                    # Afficher le résultat avec le statut approprié
                     display_status_line(result['message'], result['status'])
                     
-                    if result['status'] == 'warning' and result['data'] is not None:
-                        with st.expander("Voir les détails des composites proches"):
-                            st.dataframe(result['data'])
+                    # Afficher les résultats détaillés si des doublons ont été trouvés
+                    if result['status'] != 'success' and result['data'] is not None:
+                        # Afficher le résumé des types de doublons
+                        st.subheader("Résumé des doublons détectés")
+                        if 'summary' in result['data']:
+                            st.dataframe(result['data']['summary'])
+                        
+                        # Créer des onglets pour les différents types de doublons
+                        if 'details' in result['data']:
+                            duplicate_types = list(result['data']['details'].keys())
+                            if duplicate_types:
+                                duplicate_tabs = st.tabs(duplicate_types)
+                                
+                                for i, dup_type in enumerate(duplicate_types):
+                                    with duplicate_tabs[i]:
+                                        df = result['data']['details'][dup_type]
+                                        
+                                        if dup_type == 'spatial_duplicates':
+                                            st.write(f"**{len(df)}** paires de composites trouvées à moins de {distance_threshold} mètres l'une de l'autre:")
+                                            
+                                            # Ajouter un slider pour filtrer par distance
+                                            if len(df) > 0:
+                                                min_dist = df['distance_m'].min()
+                                                max_dist = df['distance_m'].max()
+                                                max_display = st.slider(
+                                                    "Filtrer par distance maximale (m):",
+                                                    min_value=float(min_dist),
+                                                    max_value=float(max_dist),
+                                                    value=float(max_dist),
+                                                    step=0.01
+                                                )
+                                                filtered_df = df[df['distance_m'] <= max_display]
+                                                st.dataframe(filtered_df)
+                                                
+                                                # Carte interactive des doublons spatiaux
+                                                if st.checkbox("Afficher la carte des doublons spatiaux", key=f"show_spatial_map_{dup_type}"):
+                                                    try:
+                                                        # Préparer les données pour la visualisation
+                                                        # Créer une carte de base avec les points spatialement proches
+                                                        fig = go.Figure()
+                                                        
+                                                        # Ajouter les lignes entre les paires de points
+                                                        for idx, row in filtered_df.iterrows():
+                                                            fig.add_trace(go.Scatter3d(
+                                                                x=[row['x1'], row['x2']],
+                                                                y=[row['y1'], row['y2']],
+                                                                z=[row['z1'], row['z2']],
+                                                                mode='lines',
+                                                                line=dict(color='red', width=2),
+                                                                showlegend=False
+                                                            ))
+                                                        
+                                                        # Ajouter tous les points
+                                                        all_points = pd.DataFrame({
+                                                            'x': list(filtered_df['x1']) + list(filtered_df['x2']),
+                                                            'y': list(filtered_df['y1']) + list(filtered_df['y2']),
+                                                            'z': list(filtered_df['z1']) + list(filtered_df['z2']),
+                                                            'holeid': list(filtered_df['holeid1']) + list(filtered_df['holeid2']),
+                                                            'type': ['Point 1'] * len(filtered_df) + ['Point 2'] * len(filtered_df)
+                                                        })
+                                                        
+                                                        fig.add_trace(go.Scatter3d(
+                                                            x=all_points['x'],
+                                                            y=all_points['y'],
+                                                            z=all_points['z'],
+                                                            mode='markers',
+                                                            marker=dict(
+                                                                size=5,
+                                                                color='blue',
+                                                                opacity=0.8
+                                                            ),
+                                                            text=all_points['holeid'],
+                                                            hoverinfo='text',
+                                                            name='Composites'
+                                                        ))
+                                                        
+                                                        fig.update_layout(
+                                                            title='Visualisation 3D des doublons spatiaux',
+                                                            scene=dict(
+                                                                xaxis_title='X',
+                                                                yaxis_title='Y',
+                                                                zaxis_title='Z',
+                                                                aspectmode='data'
+                                                            ),
+                                                            height=600,
+                                                            margin=dict(l=0, r=0, b=0, t=30)
+                                                        )
+                                                        
+                                                        st.plotly_chart(fig, use_container_width=True)
+                                                    except Exception as e:
+                                                        st.error(f"Erreur lors de la création de la carte: {str(e)}")
+                                        else:
+                                            st.write(f"**{len(df)}** doublons de type '{dup_type}' détectés:")
+                                            st.dataframe(df)
                     
                     # Ajouter au rapport
                     st.session_state.report_data['validation_results']['composite_duplicates'] = {
                         'status': result['status'],
                         'message': result['message'],
-                        'count': len(result['data']) if result['data'] is not None else 0
+                        'count': sum(result['counts'].values()) if 'counts' in result else 0
                     }
                 
                 # Préparation du résumé de validation
@@ -906,8 +1155,178 @@ with validate_tab:
                 
                 st.success(f"Validation terminée: {success_count} succès, {warning_count} avertissements, {error_count} erreurs")
         
-        # Affichage des résultats de validation précédents
-        if st.session_state.validation_results:
+        else:
+            # Affichage des contrôles pour une validation personnalisée des composites
+            if 'composites' in st.session_state.files:
+                st.subheader("Validation personnalisée des composites")
+                
+                with st.form("composite_validation_form"):
+                    composite_data = st.session_state.files['composites']
+                    
+                    # Afficher les options de configuration
+                    st.markdown("### Options de vérification des doublons")
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        # Sélection multiple d'attributs à comparer
+                        available_columns = list(composite_data.columns)
+                        selected_attributes = st.multiselect(
+                            "Sélectionner les attributs à comparer pour les doublons:",
+                            options=available_columns,
+                            default=st.session_state.composite_attributes,
+                            help="Sélectionnez les attributs (ex: teneurs métalliques) pour détecter les doublons par valeurs identiques."
+                        )
+                    
+                    with col2:
+                        # Seuil de distance pour la proximité spatiale
+                        spatial_threshold = st.number_input(
+                            "Seuil de distance (mètres):",
+                            min_value=0.01,
+                            max_value=10.0,
+                            value=distance_threshold,
+                            step=0.1,
+                            help="Distance maximale pour considérer deux points comme doublons spatiaux"
+                        )
+                    
+                    submitted = st.form_submit_button("Vérifier les doublons de composites")
+                    
+                    if submitted:
+                        with st.spinner("Analyse des composites en cours..."):
+                            # Mettre à jour la liste des attributs sélectionnés
+                            if selected_attributes:
+                                st.session_state.composite_attributes = selected_attributes
+                            
+                            # Lancer l'analyse des doublons
+                            result = check_composite_duplicates(
+                                composite_data, 
+                                distance_threshold=spatial_threshold,
+                                match_attributes=selected_attributes if selected_attributes else None
+                            )
+                            
+                            st.session_state.validation_results['composite_duplicates'] = result
+                
+                # Afficher les résultats s'ils existent
+                if 'composite_duplicates' in st.session_state.validation_results:
+                    result = st.session_state.validation_results['composite_duplicates']
+                    
+                    display_status_line(result['message'], result['status'])
+                    
+                    # Afficher les résultats détaillés si des doublons ont été trouvés
+                    if result['status'] != 'success' and result['data'] is not None:
+                        # Afficher le résumé des types de doublons
+                        st.subheader("Résumé des doublons détectés")
+                        if 'summary' in result['data']:
+                            st.dataframe(result['data']['summary'])
+                        
+                        # Créer des onglets pour les différents types de doublons
+                        if 'details' in result['data']:
+                            duplicate_types = list(result['data']['details'].keys())
+                            if duplicate_types:
+                                duplicate_tabs = st.tabs(duplicate_types)
+                                
+                                for i, dup_type in enumerate(duplicate_types):
+                                    with duplicate_tabs[i]:
+                                        df = result['data']['details'][dup_type]
+                                        
+                                        if dup_type == 'spatial_duplicates':
+                                            st.write(f"**{len(df)}** paires de composites trouvées à moins de {distance_threshold} mètres l'une de l'autre:")
+                                            
+                                            # Ajouter un slider pour filtrer par distance
+                                            if len(df) > 0:
+                                                min_dist = df['distance_m'].min()
+                                                max_dist = df['distance_m'].max()
+                                                max_display = st.slider(
+                                                    "Filtrer par distance maximale (m):",
+                                                    min_value=float(min_dist),
+                                                    max_value=float(max_dist),
+                                                    value=float(max_dist),
+                                                    step=0.01
+                                                )
+                                                filtered_df = df[df['distance_m'] <= max_display]
+                                                st.dataframe(filtered_df)
+                                                
+                                                # Export des résultats filtrés
+                                                col1, col2 = st.columns(2)
+                                                with col1:
+                                                    if st.button("Exporter les résultats filtrés (CSV)"):
+                                                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                                                        csv_href = download_button(filtered_df, f"composites_doublons_{timestamp}.csv", "Télécharger CSV")
+                                                        st.markdown(csv_href, unsafe_allow_html=True)
+                                                with col2:
+                                                    if st.button("Exporter les résultats filtrés (Excel)"):
+                                                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                                                        excel_href = download_button(filtered_df, f"composites_doublons_{timestamp}.xlsx", "Télécharger Excel")
+                                                        st.markdown(excel_href, unsafe_allow_html=True)
+                                                
+                                                # Carte interactive des doublons spatiaux
+                                                if st.checkbox("Afficher la carte des doublons spatiaux", key=f"show_spatial_map_{dup_type}_custom"):
+                                                    try:
+                                                        # Préparer les données pour la visualisation
+                                                        # Créer une carte de base avec les points spatialement proches
+                                                        fig = go.Figure()
+                                                        
+                                                        # Ajouter les lignes entre les paires de points
+                                                        for idx, row in filtered_df.iterrows():
+                                                            fig.add_trace(go.Scatter3d(
+                                                                x=[row['x1'], row['x2']],
+                                                                y=[row['y1'], row['y2']],
+                                                                z=[row['z1'], row['z2']],
+                                                                mode='lines',
+                                                                line=dict(color='red', width=2),
+                                                                showlegend=False
+                                                            ))
+                                                        
+                                                        # Ajouter tous les points
+                                                        all_points = pd.DataFrame({
+                                                            'x': list(filtered_df['x1']) + list(filtered_df['x2']),
+                                                            'y': list(filtered_df['y1']) + list(filtered_df['y2']),
+                                                            'z': list(filtered_df['z1']) + list(filtered_df['z2']),
+                                                            'holeid': list(filtered_df['holeid1']) + list(filtered_df['holeid2']),
+                                                            'type': ['Point 1'] * len(filtered_df) + ['Point 2'] * len(filtered_df)
+                                                        })
+                                                        
+                                                        fig.add_trace(go.Scatter3d(
+                                                            x=all_points['x'],
+                                                            y=all_points['y'],
+                                                            z=all_points['z'],
+                                                            mode='markers',
+                                                            marker=dict(
+                                                                size=5,
+                                                                color='blue',
+                                                                opacity=0.8
+                                                            ),
+                                                            text=all_points['holeid'],
+                                                            hoverinfo='text',
+                                                            name='Composites'
+                                                        ))
+                                                        
+                                                        fig.update_layout(
+                                                            title='Visualisation 3D des doublons spatiaux',
+                                                            scene=dict(
+                                                                xaxis_title='X',
+                                                                yaxis_title='Y',
+                                                                zaxis_title='Z',
+                                                                aspectmode='data'
+                                                            ),
+                                                            height=600,
+                                                            margin=dict(l=0, r=0, b=0, t=30)
+                                                        )
+                                                        
+                                                        st.plotly_chart(fig, use_container_width=True)
+                                                    except Exception as e:
+                                                        st.error(f"Erreur lors de la création de la carte: {str(e)}")
+                                        else:
+                                            st.write(f"**{len(df)}** doublons de type '{dup_type}' détectés:")
+                                            st.dataframe(df)
+                                            
+                                            # Export option for non-spatial duplicates
+                                            if st.button(f"Exporter les doublons {dup_type} (Excel)", key=f"export_{dup_type}"):
+                                                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                                                excel_href = download_button(df, f"composites_doublons_{dup_type}_{timestamp}.xlsx", "Télécharger Excel")
+                                                st.markdown(excel_href, unsafe_allow_html=True)
+        
+        # Affichage des résultats de validation précédents de façon générale
+        if st.session_state.validation_results and 'composite_duplicates' not in st.session_state.validation_results.keys():
             st.subheader("Résultats de validation existants")
             
             # Option pour afficher tous les détails
@@ -1180,6 +1599,7 @@ with report_tab:
             <html>
             <head>
                 <title>Rapport de Validation des Données de Forage Minier</title>
+                <meta charset="UTF-8">
                 <style>
                     body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; color: #333; }}
                     .container {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
